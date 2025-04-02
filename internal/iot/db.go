@@ -51,20 +51,20 @@ func (d *DB) Device(ctx context.Context, id ID) (Device, error) {
 		type Request = batchque.Request[ID, Device]
 		dev, err := d.dbq.Do(ctx, id, func(ctx context.Context, r []Request) {
 			// drop some dangling requests
-			c1 := make(chan Request, 1)
+			rc := make(chan Request, 1)
 			go func() {
-				defer close(c1)
+				defer close(rc)
 				for _, r := range r {
 					select {
 					case <-r.Context().Done():
-					case c1 <- r:
+					case rc <- r:
 					}
 				}
 			}()
 			// todo: check cache
-			c2 := make(chan Request, 1)
+			rrc := make(chan Request, 1)
 			var wg sync.WaitGroup
-			for r := range c1 {
+			for r := range rc {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -72,19 +72,19 @@ func (d *DB) Device(ctx context.Context, id ID) (Device, error) {
 					// if not found check in the database
 					select {
 					case <-r.Context().Done():
-					case c2 <- r:
+					case rrc <- r:
 					}
 				}()
 			}
 			go func() {
 				wg.Wait()
-				close(c2)
+				close(rrc)
 			}()
 			var (
 				rr = make([]Request, 0, len(r))
 				id = make([]ID, 0, len(r))
 			)
-			for r := range c2 {
+			for r := range rrc {
 				select {
 				case <-r.Context().Done():
 				default:
@@ -187,20 +187,20 @@ func (d *DB) Within(ctx context.Context, loc Location, r float64) ([]Device, err
 		type Request = batchque.Request[Key, []Device]
 		dev, err := d.wbq.Do(ctx, Key{loc, r}, func(ctx context.Context, r []Request) {
 			// drop some dangling requests
-			c1 := make(chan Request, 1)
+			rc := make(chan Request, 1)
 			go func() {
-				defer close(c1)
+				defer close(rc)
 				for _, r := range r {
 					select {
 					case <-r.Context().Done():
-					case c1 <- r:
+					case rc <- r:
 					}
 				}
 			}()
 			// todo: check cache
-			c2 := make(chan Request, 1)
+			rrc := make(chan Request, 1)
 			var wg sync.WaitGroup
-			for r := range c1 {
+			for r := range rc {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -208,20 +208,20 @@ func (d *DB) Within(ctx context.Context, loc Location, r float64) ([]Device, err
 					// if not found check in the database
 					select {
 					case <-r.Context().Done():
-					case c2 <- r:
+					case rrc <- r:
 					}
 				}()
 			}
 			go func() {
 				wg.Wait()
-				close(c2)
+				close(rrc)
 			}()
 			var (
 				rr = make([]Request, 0, len(r))
 				ll = make([]Location, 0, len(r))
 				rd = make([]float64, 0, len(r))
 			)
-			for r := range c2 {
+			for r := range rrc {
 				select {
 				case <-r.Context().Done():
 				default:
@@ -248,41 +248,41 @@ func (d *DB) Within(ctx context.Context, loc Location, r float64) ([]Device, err
 						return
 					}
 					// query for data
-					g, gCtx := errgroup.WithContext(r.Context())
-					var ci = make(chan ID, 1)
+					g, ctx := errgroup.WithContext(r.Context())
+					var iic = make(chan ID, 1)
 					g.Go(func() error {
-						defer close(ci)
+						defer close(iic)
 						for _, id := range ii {
 							select {
-							case <-gCtx.Done():
-								return gCtx.Err()
-							case ci <- id:
+							case <-ctx.Done():
+								return ctx.Err()
+							case iic <- id:
 							}
 						}
 						return nil
 					})
 
-					var c3 = make(chan Device, 1)
-					for id := range ci {
+					var ddc = make(chan Device, 1)
+					for id := range iic {
 						g.Go(func() error {
-							d, err := d.Device(gCtx, id)
+							d, err := d.Device(ctx, id)
 							if err != nil {
 								return err
 							}
 							select {
-							case <-gCtx.Done():
-								return gCtx.Err()
-							case c3 <- d:
+							case <-ctx.Done():
+								return ctx.Err()
+							case ddc <- d:
 							}
 							return nil
 						})
 					}
 					go func() {
 						g.Wait()
-						close(c3)
+						close(ddc)
 					}()
 					var dd = make([]Device, 0, len(ii))
-					for d := range c3 {
+					for d := range ddc {
 						dd = append(dd, d)
 					}
 					if err := g.Wait(); err != nil {
