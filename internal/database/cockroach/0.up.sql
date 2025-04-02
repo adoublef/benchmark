@@ -10,14 +10,12 @@ create type state as enum ('Created');
 create table iot.device (
   id uuid
   , tag varchar(40) 
-    not null 
     check (length(tag) >= 8) -- unique?
   , long float8 
     default 0
   , lat float8
     default 0
   , state state
-    not null
     default 'Created'
   , primary key (id)
 );
