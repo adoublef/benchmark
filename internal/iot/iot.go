@@ -10,7 +10,7 @@ import "github.com/google/uuid"
 type Device struct {
 	ID  ID
 	Loc Location
-	// Tag AT00000001
+	Tag Tag // Tag AT00000001
 }
 
 type ID = uuid.UUID // alias

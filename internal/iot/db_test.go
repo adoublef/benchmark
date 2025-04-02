@@ -25,20 +25,24 @@ func TestDB_Within(t *testing.T) {
 		type testcase struct {
 			name string
 			loc  Location
+			tag  Tag
 		}
 
 		{
 			tt := []testcase{
 				{
 					name: "zero",
+					tag:  "00000001",
 				},
 				{
 					name: "long=1,lat=1",
 					loc:  Location{1, 1},
+					tag:  "00000002",
 				},
 				{
 					name: "long=2,lat=3",
 					loc:  Location{2, 3},
+					tag:  "00000003",
 				},
 			}
 
@@ -58,7 +62,7 @@ func TestDB_Within(t *testing.T) {
 
 			for tc := range c {
 				g.Go(func() error {
-					_, err := d.Pin(ctx, tc.loc)
+					_, err := d.Pin(ctx, tc.loc, tc.tag)
 					return err
 				})
 			}
@@ -89,7 +93,7 @@ func TeestDB_Edit(t *testing.T) {
 		)
 		t.Cleanup(func() { d.Wait() })
 
-		four, err := d.Pin(ctx, Location{2, 3})
+		four, err := d.Pin(ctx, Location{2, 3}, "00000001")
 		is.OK(t, err) // d.Pin(ctx, loc={2,3})
 
 		err = d.EditFunc(ctx, four, func(d *Device) error { d.Loc = Location{-2, 3}; return nil })
