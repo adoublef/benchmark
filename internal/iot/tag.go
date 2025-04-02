@@ -37,7 +37,7 @@ func (t Tag) Value() (driver.Value, error) {
 	if len(t) == 0 {
 		return nil, nil
 	}
-	return string(t), nil
+	return t.String(), nil
 }
 
 func (t Tag) MarshalText() ([]byte, error) {
@@ -47,7 +47,7 @@ func (t Tag) MarshalText() ([]byte, error) {
 func (t *Tag) UnmarshalText(text []byte) (err error) {
 	*t, err = ParseTag(string(text))
 	if err != nil {
-		return err // wrap with json error?
+		return fmt.Errorf("cannot unmarshal into iot.Tag: %w", err)
 	}
 	return nil
 }
