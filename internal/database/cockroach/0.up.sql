@@ -5,14 +5,19 @@
 
 create schema iot;
 
+create type state as enum ('Created');
+
 create table iot.device (
   id uuid
-  , tag varchar(256) 
+  , tag varchar(40) 
     not null 
-    check (name <> '') -- unique?
+    check (length(tag) >= 8) -- unique?
   , long float8 
     default 0
   , lat float8
     default 0
+  , state state
+    not null
+    default 'Created'
   , primary key (id)
 );
