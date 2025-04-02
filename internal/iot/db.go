@@ -133,7 +133,7 @@ func (d *DB) Device(ctx context.Context, id ID) (Device, error) {
 
 func (d *DB) getDevice(ctx context.Context, id ...ID) iter.Seq2[Device, error] {
 	const query = `
-select id, tag, long, lat
+select id, tag, long, lat, state
 from iot.device
 where id = $1`
 	var b pgx.Batch
@@ -151,7 +151,7 @@ where id = $1`
 		for range b.Len() {
 			dev, err := func() (Device, error) {
 				var dev Device
-				err := br.QueryRow().Scan(&dev.ID, &dev.Tag, &dev.Loc.Longitude, &dev.Loc.Latitude)
+				err := br.QueryRow().Scan(&dev.ID, &dev.Tag, &dev.Loc.Longitude, &dev.Loc.Latitude, &dev.State)
 				if err != nil {
 					return Device{}, err
 				}
@@ -167,10 +167,10 @@ where id = $1`
 // Pin a new [Device] to the world map.
 func (d *DB) Pin(ctx context.Context, loc Location, tag Tag) (ID, error) {
 	const query = `
-insert into iot.device (id, tag, long, lat)
-values ($1, $2, $3, $4)`
+insert into iot.device (id, tag, long, lat, state)
+values ($1, $2, $3, $4, $5)`
 	id := uuid.Must(uuid.NewV7())
-	_, err := d.RWC.Exec(ctx, query, id, tag, loc.Longitude, loc.Latitude)
+	_, err := d.RWC.Exec(ctx, query, id, tag, loc.Longitude, loc.Latitude, Created)
 	if err != nil {
 		return ID{}, err
 	}
