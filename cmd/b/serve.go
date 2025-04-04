@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -17,7 +18,9 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/adoublef/benchmark/internal/iot"
 	"github.com/adoublef/benchmark/internal/net/http"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -27,12 +30,16 @@ type serve struct {
 		addr            string        // --http-address
 		gracefulTimeout time.Duration // HTTP_GRACEFUL_TIMEOUT
 	}
+	db struct {
+		url string // --database-url
+	}
 	logLevel slog.Level // debug or info
 }
 
 func (c *serve) parse(args []string, getenv func(string) string, stdin io.Reader) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.StringVar(&c.http.addr, "http-address", ":8080", "http address")
+	fs.StringVar(&c.db.url, "database-url", "", "database url") // cannot be empty
 	// debug
 	debug := fs.Bool("debug", false, "debug mode")
 	err := fs.Parse(args)
@@ -62,14 +69,24 @@ func (c *serve) run(ctx context.Context, stderr, stdout io.Writer) error {
 	ctx, cancel := signal.NotifyContext(ctx, unix.SIGINT, unix.SIGKILL, unix.SIGTERM)
 	defer cancel()
 
-	g, ctx := errgroup.WithContext(ctx)
+	pool, err := pgxpool.New(ctx, c.db.url)
+	if err != nil {
+		return fmt.Errorf("cannot connect to postgres: %w", err)
+	}
+	defer pool.Close() // can be added to a group cleanup function
+
+	var (
+		iotdb = &iot.DB{RWC: pool}
+	)
 
 	s := &http.Server{
 		Addr:        c.http.addr,
 		BaseContext: func(l net.Listener) context.Context { return ctx },
-		Handler:     http.Handler(),
+		Handler:     http.Handler(iotdb),
 	}
 	s.RegisterOnShutdown(cancel)
+
+	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() (err error) {
 		log.Printf("Http server listening at address %s", s.Addr)
