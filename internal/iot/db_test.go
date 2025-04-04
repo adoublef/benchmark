@@ -184,7 +184,7 @@ func TestDB_Edit(t *testing.T) {
 func newDB(tb testing.TB) *DB {
 	tb.Helper()
 
-	p, m, pr, err := container.Pool(tb.Context(), "Test")
+	p, m, pr, err := container.Pool(tb.Context(), tb.Name())
 	is.OK(tb, err) // container.Pool(ctx)
 	tb.Cleanup(func() { p.Close() })
 	tb.Cleanup(func() { pr.Close() })

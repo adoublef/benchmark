@@ -12,7 +12,7 @@ import (
 	"os"
 	"testing"
 
-	postgis "github.com/adoublef/benchmark/internal/database/postgis"
+	postgres "github.com/adoublef/benchmark/internal/database/postgis"
 	"github.com/testcontainers/testcontainers-go"
 )
 
@@ -31,11 +31,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-var container *postgis.Container
+var container *postgres.Container
 
 // setup initialises containers within the pacakge.
 func setup(ctx context.Context) (err error) {
-	container, err = postgis.Run(ctx, "")
+	container, err = postgres.Run(ctx, "")
 	if err != nil {
 		return
 	}

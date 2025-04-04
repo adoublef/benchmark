@@ -426,7 +426,7 @@ where st_dwithin(st_makepoint(long, lat), st_makepoint($2, $3), $1)`
 // Region returns a list of [Device] within a closed polygon region.
 func (d *DB) Region(ctx context.Context, pp ...Point) ([]Device, error) {
 	type Key = struct {
-		WKT string
+		WKT string // a slice is not comparable so a string is a compromise
 	}
 	// can we do this better?
 	// polygon((%s))
@@ -437,6 +437,7 @@ func (d *DB) Region(ctx context.Context, pp ...Point) ([]Device, error) {
 		return fmt.Sprintf("%s, %g %g", sum, p.X, p.Y)
 	}, "", slices.Values(pp))
 	wkt := fmt.Sprintf("polygon((%s))", coord)
+
 	res := d.csf.DoChanContext(ctx, Key{wkt}, func(ctx context.Context) ([]Device, error) {
 		type Request = batchque.Request[Key, []Device]
 		dev, err := d.cbq.Do(ctx, Key{wkt}, func(ctx context.Context, r []Request) {
@@ -577,12 +578,12 @@ where st_coveredby(
 // By returns a slice of [Device] by their [ID].
 //
 // TODO: preserve order
-func (d *DB) By(ctx context.Context, id ...ID) ([]Device, error) {
+func (d *DB) By(ctx context.Context, ii ...ID) ([]Device, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	var iic = make(chan ID, 1)
 	g.Go(func() error {
 		defer close(iic)
-		for _, id := range id {
+		for _, id := range ii {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -611,7 +612,7 @@ func (d *DB) By(ctx context.Context, id ...ID) ([]Device, error) {
 		close(ddc)
 	}()
 	// can we make this an iterator?
-	var dd = make([]Device, 0, len(id))
+	var dd = make([]Device, 0, len(ii))
 	for d := range ddc {
 		dd = append(dd, d)
 	}
