@@ -91,9 +91,10 @@ func newClientHTTP(tb testing.TB, h http.Handler) (*http.Client, *nettest.Proxy)
 func newDB(tb testing.TB) *iot.DB {
 	tb.Helper()
 
-	p, m, err := container.Pool(tb.Context())
+	p, m, pr, err := container.Pool(tb.Context(), "Test")
 	is.OK(tb, err) // container.Pool(ctx)
 	tb.Cleanup(func() { p.Close() })
+	tb.Cleanup(func() { pr.Close() })
 
 	is.OK(tb, m.MigrateUp(tb.Context())) // m.MigrateUp(ctx)
 	tb.Cleanup(func() { m.MigrateDown(context.Background()) })
