@@ -155,24 +155,24 @@ func TestDB_Edit(t *testing.T) {
 		)
 		t.Cleanup(func() { d.Wait() })
 
-		four, err := d.Pin(ctx, Location{2, 3}, "00000001")
+		id, err := d.Pin(ctx, Location{2, 3}, "00000001")
 		is.OK(t, err) // d.Pin(ctx, loc={2,3})
 
 		{
 			g, ctx := errgroup.WithContext(ctx)
 			g.Go(func() error {
-				return d.EditFunc(ctx, four, func(d *Device) error { d.Loc = Location{-2, -3}; return nil })
+				return d.EditFunc(ctx, id, func(d *Device) error { d.Loc = Location{-2, -3}; return nil })
 			})
 			g.Go(func() error {
-				return d.EditFunc(ctx, four, func(d *Device) error { d.Tag = "00000002"; return nil })
+				return d.EditFunc(ctx, id, func(d *Device) error { d.Tag = "00000002"; return nil })
 			})
 			g.Go(func() error {
-				return d.EditFunc(ctx, four, func(d *Device) error { d.State = Started; return nil })
+				return d.EditFunc(ctx, id, func(d *Device) error { d.State = Started; return nil })
 			})
 			is.OK(t, g.Wait()) // d.Edit
 		}
 
-		dev, err := d.Device(ctx, four)
+		dev, err := d.Device(ctx, id)
 		is.OK(t, err) // d.Device(ctx, id=four)
 
 		is.Equal(t, dev.Loc, Location{-2, -3}) // location change
