@@ -23,12 +23,12 @@ type Device struct {
 type ID = uuid.UUID // alias
 
 type Location struct {
-	Longitude float64
-	Latitude  float64
+	Longitude float64 `json:"longitude"`
+	Latitude  float64 `json:"latitude"`
 }
 
 func (st State) String() string {
-	if Created <= st && st <= Created {
+	if Created <= st && st <= Started {
 		return devStates[st]
 	}
 	return iotas.Format(nil, st)
@@ -40,6 +40,7 @@ type State uint8
 
 const (
 	Created State = iota // Initial state for a new [Device].
+	Started
 )
 
 // Scan implements sql.Scanner interface
@@ -81,4 +82,9 @@ func ParseState(s string) (State, error) {
 
 var devStates = []string{
 	"Created",
+	"Started",
+}
+
+type Point struct {
+	X, Y float64
 }

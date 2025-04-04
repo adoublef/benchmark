@@ -12,16 +12,9 @@ import (
 	"os"
 	"testing"
 
-	. "github.com/adoublef/benchmark/internal/database/cockroach"
+	postgis "github.com/adoublef/benchmark/internal/database/postgis"
 	"github.com/testcontainers/testcontainers-go"
-	"go.adoublef.dev/testing/is"
 )
-
-func TestPool(t *testing.T) {
-	p, _, err := container.Pool(t.Context())
-	is.OK(t, err) // Pool
-	p.Close()     //
-}
 
 func TestMain(m *testing.M) {
 	err := setup(context.Background())
@@ -38,11 +31,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-var container *Container
+var container *postgis.Container
 
 // setup initialises containers within the pacakge.
 func setup(ctx context.Context) (err error) {
-	container, err = Run(ctx, "")
+	container, err = postgis.Run(ctx, "")
 	if err != nil {
 		return
 	}

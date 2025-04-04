@@ -8,24 +8,26 @@ package iot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.adoublef.dev/runtime/debug"
 	"go.adoublef.dev/sync/batchque"
-	"go.adoublef.dev/sync/hashque"
 	"go.adoublef.dev/xiter"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/util/singleflight"
 )
 
 func (d *DB) Wait() {
-	d.dbq.Stop()  // todo: use Wait
-	d.wbq.Stop()  // todo: use Wait
-	d.efbq.Stop() // todo: use Wait
+	// d.dbq.Stop()  // todo: fix stop
+	// d.wbq.Stop() // todo: fix stop
+	// d.efbq.Stop() // todo: fix stop
 }
 
 type DB struct {
@@ -33,6 +35,10 @@ type DB struct {
 
 	dsf singleflight.Group[ID, Device]
 	dbq batchque.Group[ID, Device]
+	pbq batchque.Group[struct {
+		Location
+		Tag
+	}, ID]
 	wsf singleflight.Group[struct {
 		Location
 		float64
@@ -41,8 +47,18 @@ type DB struct {
 		Location
 		float64
 	}, []Device]
+	csf singleflight.Group[struct {
+		WKT string // calculated based on []Points
+	}, []Device]
+	cbq batchque.Group[struct {
+		WKT string // calculated based on []Points
+	}, []Device]
+	fnbq batchque.Group[struct {
+		ID
+		Func func(*Device) error
+	}, struct{}]
 	efbq batchque.Group[Device, struct{}]
-	efhq hashque.Group[ID]
+	// efhq hashque.Group[ID]
 }
 
 // Device returns a [Device].
@@ -165,20 +181,106 @@ where id = $1`
 }
 
 // Pin a new [Device] to the world map.
+//
+// TODO: batch insertions.
 func (d *DB) Pin(ctx context.Context, loc Location, tag Tag) (ID, error) {
+	type Key = struct {
+		Location
+		Tag
+	}
+	type Request = batchque.Request[Key, ID]
+	id, err := d.pbq.Do(ctx, Key{loc, tag}, func(ctx context.Context, r []Request) {
+		// drop some dangling requests
+		rc := make(chan Request, 1)
+		go func() {
+			defer close(rc)
+			for _, r := range r {
+				select {
+				case <-r.Context().Done():
+				case rc <- r:
+				}
+			}
+		}()
+		// collect the remainder
+		var (
+			rr = make([]Request, 0, len(r))
+			ll = make([]Location, 0, len(r))
+			tt = make([]Tag, 0, len(r))
+		)
+		for r := range rc {
+			select {
+			case <-r.Context().Done():
+			default:
+				rr = append(rr, r)
+				ll = append(ll, r.Val.Location)
+				tt = append(tt, r.Val.Tag)
+			}
+		}
+
+		var wg sync.WaitGroup
+		seq := xiter.Zip2(d.pin(ctx, ll, tt), slices.All(rr))
+		for z := range seq {
+			if z.Ok1 != z.Ok2 {
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				var (
+					r   = z.V2
+					id  = z.K1
+					err = z.V1
+				)
+				if err != nil {
+					r.CancelFunc(err)
+					return
+				}
+				r.C <- id
+				// populate the cache here
+				// evict if we go over the size?
+			}()
+		}
+		wg.Wait()
+		// evict if we go over the size?
+	})
+	return id, err
+}
+
+func (d *DB) pin(ctx context.Context, loc []Location, tag []Tag) iter.Seq2[ID, error] {
+	// should assert that len(loc) == len(tag)
 	const query = `
 insert into iot.device (id, tag, long, lat, state)
 values ($1, $2, $3, $4, $5)`
-	id := uuid.Must(uuid.NewV7())
-	_, err := d.RWC.Exec(ctx, query, id, tag, loc.Longitude, loc.Latitude, Created)
-	if err != nil {
-		return ID{}, err
+	var b pgx.Batch
+	b.QueuedQueries = make([]*pgx.QueuedQuery, len(tag))
+	for i := range b.Len() {
+		b.QueuedQueries[i] = &pgx.QueuedQuery{
+			SQL:       query,
+			Arguments: []any{uuid.Must(uuid.NewV7()), tag[i], loc[i].Longitude, loc[i].Latitude, Created},
+		}
 	}
-	return id, nil
+	return func(yield func(ID, error) bool) {
+		br := d.RWC.SendBatch(ctx, &b)
+		defer br.Close()
+
+		for i := range b.Len() {
+			id := b.QueuedQueries[i].Arguments[0].(ID)
+			err := func() error {
+				_, err := br.Exec()
+				if err != nil {
+					return err
+				}
+				return nil
+			}()
+			if !yield(id, err) {
+				return
+			}
+		}
+	}
 }
 
-// Within returns a [Device] slice withing a radius.
-func (d *DB) Within(ctx context.Context, loc Location, r float64) ([]Device, error) {
+// Radius returns a [Device] slice withing a radius limit.
+func (d *DB) Radius(ctx context.Context, loc Location, r float64) ([]Device, error) {
 	type Key = struct {
 		Location
 		float64
@@ -230,6 +332,7 @@ func (d *DB) Within(ctx context.Context, loc Location, r float64) ([]Device, err
 					rd = append(rd, r.Val.float64)
 				}
 			}
+			// var wg sync.WaitGroup
 			seq := xiter.Zip2(d.withinRadius(ctx, ll, rd), slices.All(rr))
 			for z := range seq {
 				if z.Ok1 != z.Ok2 {
@@ -248,44 +351,8 @@ func (d *DB) Within(ctx context.Context, loc Location, r float64) ([]Device, err
 						return
 					}
 					// query for data
-					g, ctx := errgroup.WithContext(r.Context())
-					var iic = make(chan ID, 1)
-					g.Go(func() error {
-						defer close(iic)
-						for _, id := range ii {
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case iic <- id:
-							}
-						}
-						return nil
-					})
-
-					var ddc = make(chan Device, 1)
-					for id := range iic {
-						g.Go(func() error {
-							d, err := d.Device(ctx, id)
-							if err != nil {
-								return err
-							}
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case ddc <- d:
-							}
-							return nil
-						})
-					}
-					go func() {
-						g.Wait()
-						close(ddc)
-					}()
-					var dd = make([]Device, 0, len(ii))
-					for d := range ddc {
-						dd = append(dd, d)
-					}
-					if err := g.Wait(); err != nil {
+					dd, err := d.By(r.Context(), ii...)
+					if err != nil {
 						r.CancelFunc(err)
 						return
 					}
@@ -356,38 +423,38 @@ where st_dwithin(st_makepoint(long, lat), st_makepoint($2, $3), $1)`
 	}
 }
 
-// EditFunc
-func (d *DB) EditFunc(ctx context.Context, id ID, f func(*Device) error) error {
-	c1 := make(chan error, 1)
-	err := d.efhq.DoContext(ctx, id, func() {
-		defer close(c1)
-		// get the device
-		dev, err := d.Device(ctx, id)
-		if err != nil {
-			c1 <- err
-			return
+// Region returns a list of [Device] within a closed polygon region.
+func (d *DB) Region(ctx context.Context, pp ...Point) ([]Device, error) {
+	type Key = struct {
+		WKT string
+	}
+	// can we do this better?
+	// polygon((%s))
+	coord := xiter.Reduce(func(sum string, p Point) string {
+		if sum == "" {
+			return fmt.Sprintf("%g %g", p.X, p.Y)
 		}
-		if err := f(&dev); err != nil {
-			c1 <- err
-			return
-		}
-		type Request = batchque.Request[Device, struct{}]
-		_, err = d.efbq.Do(ctx, dev, func(ctx context.Context, r []Request) {
+		return fmt.Sprintf("%s, %g %g", sum, p.X, p.Y)
+	}, "", slices.Values(pp))
+	wkt := fmt.Sprintf("polygon((%s))", coord)
+	res := d.csf.DoChanContext(ctx, Key{wkt}, func(ctx context.Context) ([]Device, error) {
+		type Request = batchque.Request[Key, []Device]
+		dev, err := d.cbq.Do(ctx, Key{wkt}, func(ctx context.Context, r []Request) {
 			// drop some dangling requests
-			c2 := make(chan Request, 1)
+			rc := make(chan Request, 1)
 			go func() {
-				defer close(c2)
+				defer close(rc)
 				for _, r := range r {
 					select {
 					case <-r.Context().Done():
-					case c2 <- r:
+					case rc <- r:
 					}
 				}
 			}()
 			// todo: check cache
-			c3 := make(chan Request, 1)
+			rrc := make(chan Request, 1)
 			var wg sync.WaitGroup
-			for r := range c2 {
+			for r := range rc {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -395,27 +462,27 @@ func (d *DB) EditFunc(ctx context.Context, id ID, f func(*Device) error) error {
 					// if not found check in the database
 					select {
 					case <-r.Context().Done():
-					case c3 <- r:
+					case rrc <- r:
 					}
 				}()
 			}
 			go func() {
 				wg.Wait()
-				close(c3)
+				close(rrc)
 			}()
 			var (
-				rr = make([]Request, 0, len(r))
-				dd = make([]Device, 0, len(r))
+				rr  = make([]Request, 0, len(r))
+				wkt = make([]string, 0, len(r))
 			)
-			for r := range c3 {
+			for r := range rrc {
 				select {
 				case <-r.Context().Done():
 				default:
 					rr = append(rr, r)
-					dd = append(dd, r.Val)
+					wkt = append(wkt, r.Val.WKT)
 				}
 			}
-			seq := xiter.Zip(d.editDevice(ctx, dd...), slices.Values(rr))
+			seq := xiter.Zip2(d.coveredBy(ctx, wkt...), slices.All(rr))
 			for z := range seq {
 				if z.Ok1 != z.Ok2 {
 					return
@@ -425,43 +492,301 @@ func (d *DB) EditFunc(ctx context.Context, id ID, f func(*Device) error) error {
 					defer wg.Done()
 					var (
 						r   = z.V2
+						ii  = z.K1
 						err = z.V1
 					)
 					if err != nil {
 						r.CancelFunc(err)
 						return
 					}
-					// populate the cache here
-					// evict if we go over the size?
+					dd, err := d.By(r.Context(), ii...)
+					if err != nil {
+						r.CancelFunc(err)
+						return
+					}
+					// return ids to caller
+					select {
+					case <-r.Context().Done():
+					case r.C <- dd:
+					}
 				}()
 			}
 			wg.Wait()
 			// evict if we go over the size?
 		})
-		c1 <- err
+		return dev, err
 	})
-	if err != nil {
-		return err
-	}
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-c1:
-		return err
+		return nil, ctx.Err()
+	case res := <-res:
+		return res.Val, res.Err
 	}
+}
+
+func (d *DB) coveredBy(ctx context.Context, wkt ...string) iter.Seq2[[]ID, error] {
+	const query = `
+select id
+from iot.device
+where st_coveredby(
+	st_makepoint(long, lat),
+	st_geomfromtext($1)
+)`
+
+	var b pgx.Batch
+	b.QueuedQueries = make([]*pgx.QueuedQuery, len(wkt))
+	for i := range b.Len() {
+		b.QueuedQueries[i] = &pgx.QueuedQuery{
+			SQL:       query,
+			Arguments: []any{wkt[i]},
+		}
+	}
+	return func(yield func([]ID, error) bool) {
+		br := d.RWC.SendBatch(ctx, &b)
+		defer br.Close()
+
+		for range b.Len() {
+			dd, err := func() ([]ID, error) {
+				rr, err := br.Query()
+				if err != nil {
+					return nil, err
+				}
+				defer rr.Close()
+				var dd []ID
+				for rr.Next() {
+					var d ID
+					err := rr.Scan(&d)
+					if err != nil {
+						return nil, err
+					}
+					dd = append(dd, d)
+				}
+				if err := rr.Err(); err != nil {
+					return nil, err
+				}
+				return dd, nil
+			}()
+			if !yield(dd, err) {
+				return
+			}
+		}
+	}
+}
+
+// By returns a slice of [Device] by their [ID].
+//
+// TODO: preserve order
+func (d *DB) By(ctx context.Context, id ...ID) ([]Device, error) {
+	g, ctx := errgroup.WithContext(ctx)
+	var iic = make(chan ID, 1)
+	g.Go(func() error {
+		defer close(iic)
+		for _, id := range id {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case iic <- id:
+			}
+		}
+		return nil
+	})
+	var ddc = make(chan Device, 1)
+	for id := range iic {
+		g.Go(func() error {
+			d, err := d.Device(ctx, id)
+			if err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ddc <- d:
+			}
+			return nil
+		})
+	}
+	go func() {
+		g.Wait()
+		close(ddc)
+	}()
+	// can we make this an iterator?
+	var dd = make([]Device, 0, len(id))
+	for d := range ddc {
+		dd = append(dd, d)
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return dd, nil
+}
+
+// EditFunc
+func (d *DB) EditFunc(ctx context.Context, id ID, f func(*Device) error) error {
+	// currently this will queue and so will always make a request to the database
+	// if the batch is too large. we can reduce this by batching the in-process function call
+	// leading to a single get fetch for a slice of workers.
+	type Key = struct {
+		ID
+		Func func(*Device) error
+	}
+	type Request = batchque.Request[Key, struct{}]
+	_, err := d.fnbq.Do(ctx, Key{id, f}, func(ctx context.Context, r []Request) {
+		// drop requests if no longer interested
+		rc := make(chan Request, 1)
+		go func() {
+			defer close(rc)
+			for _, r := range r {
+				select {
+				case <-r.Context().Done():
+				case rc <- r:
+				}
+			}
+		}()
+		// partition by key
+		part := make(map[ID][]Request, 1)
+		for r := range rc {
+			select {
+			case <-r.Context().Done():
+			default:
+				part[r.Val.ID] = append(part[r.Val.ID], r)
+			}
+		}
+		var wg sync.WaitGroup
+		for id, r := range part {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// hashque group to be handled now
+				// does this need to be locked? yes given we will introduce
+				// more fine-grain edits that dont end up dumping the whole
+				// back into the database. this will lead to a penality early on
+				// but best to not hide the potential complexity
+				// get the device
+				dev, err := d.Device(ctx, id) // ok to use the parent for all here
+				if err != nil {
+					// can be in a different process to not block
+					// but yields no real benefit
+					for _, r := range r {
+						r.CancelFunc(err)
+					}
+					return
+				}
+				// run the functions, for now in order.
+				// but here we can look into the priority queue for ordering
+				// create a context that is tied to the requests.
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				var merged []func() bool
+				var count atomic.Int64
+				for _, r := range r {
+					// should only apply changes for clients that
+					// are alive, but will need to look at handling
+					// that later.
+					tmp := dev
+					if err := r.Val.Func(&tmp); err != nil {
+						r.CancelFunc(err)
+						continue
+					}
+					dev = tmp
+					count.Add(1)
+					//  If stop returns false, either the context is canceled and f has been started in its own goroutine; or f was already stopped.
+					merged = append(merged, context.AfterFunc(ctx, func() {
+						debug.Printf("canceled") // not being called.
+						if count.Add(-1) == 0 {
+							cancel()
+						}
+					}))
+				}
+				defer func() {
+					for _, stop := range merged {
+						stop()
+					}
+				}()
+				// will writing a proper function make a difference.
+				// persist the data on the device batch for postgres
+				type Request = batchque.Request[Device, struct{}]
+				// this context should be bounded by the individual requests.
+				_, err = d.efbq.Do(ctx, dev, func(ctx context.Context, r []Request) {
+					// drop some dangling requests
+					rc := make(chan Request, 1)
+					go func() {
+						defer close(rc)
+						for _, r := range r {
+							select {
+							case <-r.Context().Done():
+							case rc <- r:
+							}
+						}
+					}()
+					// collect the remainder
+					var (
+						rr = make([]Request, 0, len(r))
+						dd = make([]Device, 0, len(r))
+					)
+					for r := range rc {
+						select {
+						case <-r.Context().Done():
+						default:
+							rr = append(rr, r)
+							dd = append(dd, r.Val)
+						}
+					}
+
+					var wg sync.WaitGroup
+					seq := xiter.Zip(d.editDevice(ctx, dd...), slices.Values(rr))
+					for z := range seq {
+						if z.Ok1 != z.Ok2 {
+							return
+						}
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							var (
+								r   = z.V2
+								err = z.V1
+							)
+							if err != nil {
+								r.CancelFunc(err)
+								return
+							}
+							close(r.C)
+							// populate the cache here
+							// evict if we go over the size?
+						}()
+					}
+					wg.Wait()
+					// evict if we go over the size?
+				})
+				for _, r := range r {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						if err != nil {
+							r.CancelFunc(err)
+						} else {
+							close(r.C)
+						}
+					}()
+				}
+			}()
+		}
+		wg.Wait()
+	})
+	return err
 }
 
 func (d *DB) editDevice(ctx context.Context, dev ...Device) iter.Seq[error] {
 	const query = `
-update iot.device set long = $2, lat = $3, tag = $4
+update iot.device set long = $2, lat = $3, tag = $4, state = $5
 where id = $1`
 	var b pgx.Batch
 	b.QueuedQueries = make([]*pgx.QueuedQuery, len(dev))
 	for i := range b.Len() {
 		b.QueuedQueries[i] = &pgx.QueuedQuery{
 			SQL:       query,
-			Arguments: []any{dev[i].ID, dev[i].Loc.Longitude, dev[i].Loc.Latitude, dev[i].Tag},
+			Arguments: []any{dev[i].ID, dev[i].Loc.Longitude, dev[i].Loc.Latitude, dev[i].Tag, dev[i].State},
 		}
 	}
 	return func(yield func(error) bool) {

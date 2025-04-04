@@ -77,6 +77,61 @@
 // }
 ```
 
+````go
+// const query = `
+ //
+ // select id, long, lat
+ // from iot.device
+ // where st_coveredby(
+ //
+ // st_makepoint(long, lat),
+ // st_geomfromtext($1)
+ //
+ // )
+ // `
+ //
+ // // polygon((%s))
+ // coord := xiter.Reduce(func(sum string, p Point) string {
+ //  if sum == "" {
+ //   return fmt.Sprintf("%g %g", p.X, p.Y)
+ //  }
+ //  return fmt.Sprintf("%s, %g %g", sum, p.X, p.Y)
+ // }, "", slices.Values(pp))
+ // wkt := fmt.Sprintf("polygon((%s))", coord)
+ // rr, err := d.RWC.Query(ctx, query, wkt)
+ // if err != nil {
+ //  return nil, err
+ // }
+ // defer rr.Close()
+ // var dd []Device
+ // for rr.Next() {
+ //  var d Device
+ //  err := rr.Scan(&d.ID, &d.Loc.Longitude, &d.Loc.Latitude)
+ //  if err != nil {
+ //   return nil, err
+ //  }
+ //  dd = append(dd, d)
+ // }
+ // if err := rr.Err(); err != nil {
+ //  return nil, err
+ // }
+ // return dd, nil
+```
+
+```go
+func (d *DB) Pin(ctx context.Context, loc Location, tag Tag) (ID, error) {
+ const query = `
+insert into iot.device (id, tag, long, lat, state)
+values ($1, $2, $3, $4, $5)`
+ id := uuid.Must(uuid.NewV7())
+ _, err := d.RWC.Exec(ctx, query, id, tag, loc.Longitude, loc.Latitude, Created)
+ if err != nil {
+  return ID{}, err
+ }
+ return id, nil
+}
+```
+
 ```txt
 created Initial status
 starting Transitioning from stopped or suspended to started
@@ -88,7 +143,7 @@ suspended Suspended to disk; will attempt to resume on next start
 replacing User-initiated configuration change (image, VM size, etc.) in progress
 destroying User asked for the Machine to be completely removed
 destroyed No longer exists
-```
+````
 
 ```txt
 creating Initial state for a new volume.
@@ -101,3 +156,5 @@ recovering The volume is being recovered from the pending_destroy state.
 scheduling_destroy The volume is being deleted.
 pending_destroy The volume is soft deleted.
 ```
+
+<!-- https://wktmap.com/ -->
