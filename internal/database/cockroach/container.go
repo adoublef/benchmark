@@ -10,10 +10,12 @@ import (
 	"cmp"
 	"context"
 	"embed"
+	"net/url"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go/modules/cockroachdb"
+	"go.adoublef.dev/net/nettest"
 	"maragu.dev/migrate"
 )
 
@@ -36,18 +38,27 @@ func Run(ctx context.Context, image string) (*Container, error) {
 }
 
 // New creates a new [Pool].
-func (c *Container) Pool(ctx context.Context) (*pgxpool.Pool, Migrator, error) {
+func (c *Container) Pool(ctx context.Context, name string) (*pgxpool.Pool, Migrator, *nettest.Proxy, error) {
 	cf, err := c.ConnectionConfig(ctx) // application_name
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	p, err := pgxpool.New(ctx, cf.ConnString())
+	// postgres://postgres:postgres@127.0.0.1:58859/postgres
+	u, err := url.Parse(cf.ConnString())
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// connect via the proxy
+	proxy := nettest.NewProxy(name, u.Host)
+	u.Host = proxy.Listen()
+	// debug.Printf("%q, %q = uri, proxy", uri, proxy.Listen())
+	p, err := pgxpool.New(ctx, u.String())
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	d := stdlib.OpenDBFromPool(p)
 	m := migrate.New(migrate.Options{DB: d, FS: embedFS})
-	return p, m, nil
+	return p, m, proxy, nil
 }
 
 //go:embed all:*.sql

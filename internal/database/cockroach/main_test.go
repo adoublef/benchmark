@@ -18,7 +18,7 @@ import (
 )
 
 func TestPool(t *testing.T) {
-	p, _, err := container.Pool(t.Context())
+	p, _, _, err := container.Pool(t.Context(), t.Name())
 	is.OK(t, err) // Pool
 	p.Close()     //
 }
