@@ -5,7 +5,7 @@
 
 create schema iot;
 
-create type state as enum ('Created');
+create type iot.state as enum ('Created', 'Started');
 
 create table iot.device (
   id uuid
@@ -16,7 +16,7 @@ create table iot.device (
     default 0
   , lat float8
     default 0
-  , state state
+  , state iot.state
     default 'Created'
   , primary key (id)
 );
